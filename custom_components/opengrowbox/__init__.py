@@ -29,7 +29,7 @@ from .ha_config_status import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["sensor", "number", "select", "time", "switch", "date", "text"]
+PLATFORMS = ["sensor", "number", "select", "time", "switch", "date", "datetime", "text"]
 _CONFIG_CHECK_FLAG = "__config_checked__"
 _CONFIG_AUTO_UPDATE_FLAG = "__config_auto_update_done__"
 _CLEANUP_DONE_FLAG = "__cleanup_done__"
