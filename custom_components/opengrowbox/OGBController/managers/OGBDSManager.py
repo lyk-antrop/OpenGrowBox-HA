@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -271,6 +272,30 @@ def _clean_corrupted_data(data: Dict[str, Any], room: str) -> Dict[str, Any]:
     return data
 
 
+def _merge_drying_modes(saved: Any, defaults: Any) -> Any:
+    """Align the saved drying modes with the modes defined in the defaults.
+
+    Modes missing from the saved state get their default config, modes no longer in the defaults are dropped.
+    The settings of modes that exist in both are kept as saved.
+    """
+    if not isinstance(saved, dict) or not isinstance(defaults, dict):
+        return saved
+
+    default_modes = defaults.get("modes")
+    if not isinstance(default_modes, dict):
+        return saved
+
+    saved_modes = saved.get("modes")
+    if not isinstance(saved_modes, dict):
+        saved_modes = {}
+
+    saved["modes"] = {
+        mode: saved_modes[mode] if mode in saved_modes else copy.deepcopy(config)
+        for mode, config in default_modes.items()
+    }
+    return saved
+
+
 def _merge_capabilities(data: Dict[str, Any], room: str) -> Dict[str, Any]:
     """Ensure capability schema keys exist in loaded state.
 
@@ -430,6 +455,9 @@ class OGBDSManager:
                     if not value:
                         _LOGGER.debug(f"[{self.room}] No persistable CropSteering data in state file - keeping defaults")
                         continue
+                
+                if key == "drying":
+                    value = _merge_drying_modes(value, self.data_store.get("drying"))
                 
                 self.data_store.set(key, value)
                 loaded_count += 1
@@ -683,6 +711,8 @@ class OGBDSManager:
             for key, value in loaded_data.items():
                 if key in ("devices", "capabilities"):
                     continue
+                if key == "drying":
+                    value = _merge_drying_modes(value, self.data_store.get("drying"))
                 self.data_store.set(key, value)
 
             # Keep runtime-built capabilities, only ensure schema keys exist
