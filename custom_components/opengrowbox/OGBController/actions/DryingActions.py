@@ -1,7 +1,7 @@
 """
 OpenGrowBox Drying Actions
 
-Handles all drying mode operations including ElClassico, 5DayDry, and DewBased algorithms.
+Handles all drying mode operations including ElClassico, 5DayDry, DewBased, and DewRamp algorithms.
 """
 
 import math
@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, TYPE_CHECKING
 
-from ..utils.calcs import calc_Dry5Days_vpd, calc_dew_vpd, calc_humidity_from_dew_point
+from ..utils.calcs import calc_Dry5Days_vpd, calc_dew_vpd, calc_humidity_from_dew_point, calculate_dew_point
 
 if TYPE_CHECKING:
     from ..managers.OGBgcdManager import OGBgcdManager
@@ -90,6 +90,9 @@ class DryingActions:
         elif currentDryMode == "DewBased":
             phaseConfig = self.data_store.getDeep(f"drying.modes.{currentDryMode}")
             await self.handle_DewBased(phaseConfig)
+        elif currentDryMode == "DewRamp":
+            phaseConfig = self.data_store.getDeep(f"drying.modes.{currentDryMode}")
+            await self.handle_DewRamp(phaseConfig)
         elif currentDryMode == "5DayDry":
             phaseConfig = self.data_store.getDeep(f"drying.modes.{currentDryMode}")
             await self.handle_5DayDry(phaseConfig)
@@ -556,6 +559,132 @@ class DryingActions:
                 await self._emit_action(action_name)
         else:
             _LOGGER.warning(f"{self.name}: DewBased - All conditions within tolerance")
+
+    def get_dew_ramp_target(self, config: Dict[str, Any]) -> Optional[float]:
+        """Linearly interpolate the target dew point from elapsed drying time.
+
+        Holds endDewPoint once totalDurationHours has passed. Result is rounded to 2 decimals.
+        """
+        mode_start_time = self.data_store.getDeep("drying.mode_start_time")
+        if mode_start_time is None:
+            return None
+
+        try:
+            start_dew = float(config["startDewPoint"])
+            end_dew = float(config["endDewPoint"])
+            total_hours = float(config["totalDurationHours"])
+            start_dt = (
+                datetime.fromisoformat(mode_start_time)
+                if isinstance(mode_start_time, str)
+                else mode_start_time
+            )
+        except (KeyError, ValueError, TypeError):
+            return None
+
+        if total_hours <= 0:
+            return round(end_dew, 2)
+
+        elapsed_hours = (datetime.now() - start_dt).total_seconds() / 3600
+        progress = min(max(elapsed_hours / total_hours, 0.0), 1.0)
+        return round(start_dew + (end_dew - start_dew) * progress, 2)
+
+    async def handle_DewRamp(self, config: Dict[str, Any]) -> None:
+        """
+        Drying with a target dew point that falls linearly from startDewPoint to
+        endDewPoint over totalDurationHours. The measured dew point is compared to the
+        target within dewPointTolerance; minHumidity/maxHumidity are hard RH limits that
+        override it. Actions are routed through the cooldown manager when available.
+        """
+        _LOGGER.warning(f"{self.name}: Run Drying 'DewRamp'")
+
+        if not config:
+            _LOGGER.error(f"{self.name}: DewRamp has no configuration")
+            return
+
+        tentData = self.data_store.get("tentData")
+        raw_temp = tentData.get("temperature")
+        raw_hum = tentData.get("humidity")
+        if raw_temp is None or raw_hum is None:
+            _LOGGER.warning(f"{self.name}: Missing temperature or humidity data, skipping control")
+            return
+
+        try:
+            current_temp = float(raw_temp)
+            current_hum = float(raw_hum)
+            target_temp = float(config.get("targetTemp", 20))
+            min_hum = float(config.get("minHumidity", 50))
+            max_hum = float(config.get("maxHumidity", 65))
+        except (ValueError, TypeError):
+            _LOGGER.error(f"{self.name}: Invalid sensor data or DewRamp settings: {config}")
+            return
+
+        target_dew_point = self.get_dew_ramp_target(config)
+        if target_dew_point is None:
+            _LOGGER.error(f"{self.name}: DewRamp needs startDewPoint, endDewPoint, totalDurationHours: {config}")
+            return
+
+        # Prefer the dew point sensor, fall back to deriving it from temperature and humidity
+        try:
+            raw_dew = tentData.get("dewpoint")
+            current_dew = float(raw_dew) if raw_dew is not None else float(calculate_dew_point(current_temp, current_hum))
+        except (ValueError, TypeError):
+            _LOGGER.warning(f"{self.name}: Could not determine current dew point, skipping control")
+            return
+
+        self.data_store.setDeep("drying.current_phase", "DewRamp")
+
+        tempTolerance = 0.5
+        dewPointTolerance = 0.25
+        finalActionMap = {}
+
+        _LOGGER.warning(
+            f"{self.name}: DewRamp CHECK - Current: {current_temp}°C / {current_hum}% / dew {current_dew:.2f}°C | "
+            f"Target: {target_temp}°C / dew {target_dew_point}°C (±{dewPointTolerance}) | RH limits {min_hum}-{max_hum}%"
+        )
+
+        if abs(current_temp - target_temp) > tempTolerance:
+            if current_temp < target_temp:
+                finalActionMap["Increase Heater"] = True
+                finalActionMap["Reduce Cooler"] = True
+            else:
+                finalActionMap["Increase Cooler"] = True
+                finalActionMap["Reduce Heater"] = True
+
+        dew_diff = current_dew - target_dew_point
+        too_dry = current_hum < min_hum or (dew_diff < -dewPointTolerance and current_hum <= max_hum)
+        too_humid = current_hum > max_hum or (dew_diff > dewPointTolerance and current_hum >= min_hum)
+
+        if too_dry:
+            finalActionMap["Increase Humidifier"] = True
+            finalActionMap["Reduce Dehumidifier"] = True
+            finalActionMap["Reduce Exhaust"] = True
+            finalActionMap["Increase Ventilation"] = True
+        elif too_humid:
+            finalActionMap["Increase Dehumidifier"] = True
+            finalActionMap["Reduce Humidifier"] = True
+            finalActionMap["Increase Exhaust"] = True
+            finalActionMap["Increase Ventilation"] = True
+
+        conflict_pairs = [
+            ("Increase Heater", "Reduce Heater"),
+            ("Increase Cooler", "Reduce Cooler"),
+            ("Increase Humidifier", "Reduce Humidifier"),
+            ("Increase Dehumidifier", "Reduce Dehumidifier"),
+            ("Increase Exhaust", "Reduce Exhaust"),
+            ("Increase Ventilation", "Reduce Ventilation"),
+        ]
+
+        for increase_key, reduce_key in conflict_pairs:
+            if increase_key in finalActionMap and reduce_key in finalActionMap:
+                del finalActionMap[increase_key]
+                del finalActionMap[reduce_key]
+
+        if finalActionMap:
+            _LOGGER.warning(f"{self.name}: DewRamp executing {len(finalActionMap)} actions: {list(finalActionMap.keys())}")
+            for action_name in finalActionMap:
+                await self._emit_action(action_name)
+        else:
+            _LOGGER.warning(f"{self.name}: DewRamp - Conditions within tolerance")
 
     async def handle_OwnDry(self) -> None:
         """

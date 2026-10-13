@@ -598,6 +598,15 @@ class OGBConf:
                         },
                     },
                 },
+                "DewRamp": {
+                    "isActive": False,
+                    "targetTemp": 20,
+                    "startDewPoint": 12.5,
+                    "endDewPoint": 11.5,
+                    "totalDurationHours": 240,
+                    "minHumidity": 50,
+                    "maxHumidity": 65,
+                },
                 "5DayDry": {
                     "isActive": False,
                     "phase": {
