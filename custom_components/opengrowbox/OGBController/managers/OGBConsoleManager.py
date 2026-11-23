@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
+from ..OGBDevices.Lift import Lift
 
 from ..data.OGBParams.OGBParams import (
     BUFFER_KEY_BY_PERFECTION_CHANNEL,
@@ -15,6 +16,25 @@ from ..utils.ambient import is_ambient_room
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# Lift configuration keys exposed by the "lift" console command.
+# Maps the lower-cased key to (storage key in DeviceMinMax.Lift, default).
+_LIFT_CONFIG_KEYS = {
+    "minposition": ("minPosition", Lift.DEFAULT_MIN_POSITION),
+    "maxposition": ("maxPosition", Lift.DEFAULT_MAX_POSITION),
+    "positionstep": ("positionStep", Lift.DEFAULT_STEP),
+    "settletimesec": ("settleTimeSec", Lift.DEFAULT_SETTLE_TIME),
+    "pulsedurationsec": ("pulseDurationSec", Lift.DEFAULT_PULSE_DURATION),
+    "tolerancecm": ("toleranceCM", Lift.DEFAULT_TOLERANCE_CM),
+    "mindistancecm": ("minDistanceCM", Lift.DEFAULT_MIN_DISTANCE_CM),
+    "maxdistancecm": ("maxDistanceCM", Lift.DEFAULT_MAX_DISTANCE_CM),
+    "fulltraveltimessec": ("fullTravelTimeSec", Lift.DEFAULT_FULL_TRAVEL_TIME),
+    "maxruntimesec": ("maxRuntimeSec", Lift.DEFAULT_MAX_RUNTIME),
+    "maxiterations": ("maxIterations", Lift.DEFAULT_MAX_ITERATIONS),
+    "noprogresslimit": ("noProgressLimit", Lift.DEFAULT_NO_PROGRESS_LIMIT),
+    "sensormaxagecsec": ("sensorMaxAgeSec", Lift.DEFAULT_SENSOR_MAX_AGE),
+}
+_LIFT_INTEGER_KEYS = {"maxiterations", "noprogresslimit"}
 
 @dataclass
 class CommandInfo:
@@ -276,6 +296,34 @@ class OGBConsoleManager:
             ["reset_costs", "reset_costs today", "reset_costs all"],
         )
 
+        self.register_command(
+            "lift",
+            self.cmd_lift,
+            "Shows or sets the plant Lift actuator configuration",
+            "lift [<key> <value> | reset]",
+            [
+                "lift",
+                "lift maxDistanceCM 150",
+                "lift minDistanceCM 30",
+                "lift reset",
+            ],
+        )
+
+        self.register_command(
+            "esp",
+            self.cmd_esp,
+            "Connect OGB-ESP controllers (global, one per ESP mesh): status, add, remove, mode",
+            "esp [status] | esp add <ip> [notakeover] | esp remove <ip> | "
+            "esp mode [<ip>] <local|external|free> [global|ogb_api]",
+            [
+                "esp",
+                "esp add 192.168.1.50",
+                "esp mode external",
+                "esp mode 192.168.1.50 free",
+                "esp remove 192.168.1.50",
+            ],
+        )
+
     def register_command(
         self,
         name: str,
@@ -307,7 +355,12 @@ class OGBConsoleManager:
             return
 
         self.last_command = event_command
-        _LOGGER.warning(f"[{self.room}] Received command: {event_command}")
+        logged = str(event_command or "")
+        lp = logged.split()
+        if len(lp) >= 4 and lp[0].lower() == "esp" and lp[1].lower() == "add" and lp[3].lower() not in ("notakeover", "no", "false"):
+            logged = " ".join(lp[:3] + ["***"] + lp[4:])   # a password typed into the command line
+            self.last_command = logged
+        _LOGGER.warning(f"[{self.room}] Received command: {logged}")
         await self._handle_command(event_command)
 
     async def _handle_get_commands(self, event):
@@ -549,6 +602,98 @@ class OGBConsoleManager:
         self.data_store.setDeep("controlOptionData.buffers", buffers)
         await self._send_response(
             f"✅ Buffer '{key}' ({scope} {target}) set: {previous} → {value}"
+        )
+
+
+    @staticmethod
+    def _fmt_lift_value(value) -> str:
+        """Render a lift config value without a trailing '.0' for integers."""
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if numeric.is_integer():
+            return str(int(numeric))
+        return f"{numeric:g}"
+
+    async def cmd_lift(self, params: List[str]):
+        """Shows or sets the Lift actuator configuration (DeviceMinMax.Lift).
+
+        Usage:
+            lift                          Show current configuration
+            lift <key> <value>            Set a single value
+            lift reset                    Reset all values to defaults
+        """
+        stored = self.data_store.getDeep("DeviceMinMax.Lift") or {}
+        if not isinstance(stored, dict):
+            stored = {}
+
+        def effective(key: str, default) -> float:
+            raw = stored.get(key, default)
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return float(default)
+
+        if not params:
+            response = "🛗 Lift Configuration (DeviceMinMax.Lift):\n" + "=" * 52 + "\n"
+            for _alias, (key, default) in _LIFT_CONFIG_KEYS.items():
+                response += f"  {key:<18} : {self._fmt_lift_value(effective(key, default))}\n"
+            response += "=" * 52
+            response += "\nExample: lift maxDistanceCM 150"
+            await self._send_response(response)
+            return
+
+        first = params[0].lower()
+
+        if first in ("-h", "--help", "help"):
+            await self._send_response(
+                "🛗 Lift command usage:\n"
+                "  lift                       Show current configuration\n"
+                "  lift <key> <value>         Set a value\n"
+                "  lift reset                 Reset to defaults\n"
+                "Keys: " + ", ".join(key for key, _d in _LIFT_CONFIG_KEYS.values())
+            )
+            return
+
+        if first in ("reset", "default", "defaults"):
+            self.data_store.setDeep("DeviceMinMax.Lift", {})
+            await self._send_response("✅ Lift configuration reset to defaults.")
+            return
+
+        if len(params) != 2:
+            await self._send_response(
+                "⚠️ Invalid arguments.\n"
+                "Usage: lift <key> <value>\n"
+                "Use 'lift -h' for the full key list."
+            )
+            return
+
+        alias = first
+        if alias not in _LIFT_CONFIG_KEYS:
+            await self._send_response(
+                f"⚠️ Unknown key: '{params[0]}'\n"
+                "Available: " + ", ".join(key for key, _d in _LIFT_CONFIG_KEYS.values())
+            )
+            return
+
+        key, default = _LIFT_CONFIG_KEYS[alias]
+
+        try:
+            value = float(params[1])
+        except ValueError:
+            await self._send_response("⚠️ Value must be a number.")
+            return
+
+        if alias in _LIFT_INTEGER_KEYS:
+            value = int(value)
+
+        previous = effective(key, default)
+        stored[key] = value
+        self.data_store.setDeep("DeviceMinMax.Lift", stored)
+        await self._send_response(
+            f"✅ Lift '{key}' set: {self._fmt_lift_value(previous)} → "
+            f"{self._fmt_lift_value(value)}"
         )
 
     async def cmd_list(self, params: List[str]):
@@ -2011,17 +2156,171 @@ class OGBConsoleManager:
         await self._send_response("\n".join(summary))
 
     # =========================
+    # OGB-ESP LINK
+    # =========================
+
+    async def cmd_esp(self, params: List[str]):
+        """OGB-ESP connections (see esp_link.py): the ESP pauses its local control while HA sends heartbeats."""
+        from ...esp_link import _manager
+
+        mgr = _manager(self.hass)
+        sub = params[0].lower() if params else "status"
+        errors = {
+            "invalid_auth": "wrong device password",
+            "cannot_connect": "ESP not reachable",
+            "invalid_host": "invalid address",
+            "not_found": "no such OGB-ESP (see 'esp')",
+            "default_password": "the ESP still uses its factory password - set your own in the ESP web interface first",
+            "prompt_expired": "password prompt expired - type 'esp add <ip>' again",
+        }
+
+        def err_text(r):
+            return errors.get(r.get("error"), r.get("error", "?")) + (
+                f" ({r['detail']})" if r.get("detail") else ""
+            )
+
+        if sub == "add":
+            rest = params[1:]
+            flags = {"notakeover", "no", "false"}
+            if not rest:
+                await self._send_response("⚠️ Usage: esp add <ip> [notakeover] - the password is asked for afterwards")
+                return
+            if len(rest) > 1 and rest[1].lower() not in flags:
+                # a password on the command line already went through the event bus (recorder!)
+                await self._send_response(
+                    "⛔ Do not type the password into the command line - it would be stored in Home "
+                    "Assistant's history. Not used. Type 'esp add <ip>' and enter it in the password field."
+                )
+                return
+            host = rest[0]
+            takeover = not any(x.lower() in flags for x in rest[1:])
+
+            async def on_secret(value: str):
+                r = await mgr.async_add(host, value, takeover)
+                if r.get("ok"):
+                    await self._send_response(
+                        f"✅ OGB-ESP {r['host']} connected - heartbeat every 10 s"
+                        + (", control taken over" if takeover else " (control not taken over)")
+                        + ".\nThe device password is not stored. Type 'esp' for the status."
+                    )
+                else:
+                    await self._send_response(f"❌ {err_text(r)}")
+                return r
+
+            pid = mgr.create_prompt(on_secret)
+            await self._send_response(
+                f"🔑 Device password of the OGB-ESP {host}:",
+                prompt={"id": pid, "type": "password", "label": "OGB-ESP device password",
+                        "submit": "opengrowbox/console_secret"},
+            )
+            return
+
+        if sub == "remove":
+            if len(params) < 2:
+                await self._send_response("⚠️ Usage: esp remove <ip>")
+                return
+            r = await mgr.async_remove(params[1])
+            await self._send_response(
+                f"✅ OGB-ESP {r['host']} removed - it regulates again on its own after its timeout."
+                if r.get("ok") else f"❌ {err_text(r)}"
+            )
+            return
+
+        if sub == "mode":
+            args = params[1:]
+            modes = ("local", "external", "free")
+            host = None
+            if args and args[0].lower() not in modes:
+                host, args = args[0], args[1:]
+            if not args or args[0].lower() not in modes:
+                await self._send_response("⚠️ Usage: esp mode [<ip>] <local|external|free> [global|ogb_api]")
+                return
+            mode = args[0].lower()
+            source = args[1].lower() if len(args) > 1 else "global"
+            if host is None:
+                await mgr.async_load()
+                if len(mgr.links) != 1:
+                    await self._send_response(
+                        "⚠️ Several OGB-ESP connected - give the address: esp mode <ip> " + mode
+                        if mgr.links else "⚠️ No OGB-ESP connected. Use: esp add <ip> <password>"
+                    )
+                    return
+                host = next(iter(mgr.links))
+            r = await mgr.async_set_mode(host, mode, source)
+            text = {
+                "local": "the ESP regulates itself",
+                "external": f"external control ({source}), the ESP pauses while heartbeats arrive",
+                "free": "no automatic control and no safety functions on the ESP",
+            }[mode]
+            await self._send_response(f"✅ Mode {mode}: {text}." if r.get("ok") else f"❌ {err_text(r)}")
+            return
+
+        if sub != "status":
+            await self.cmd_help(["esp"])
+            return
+
+        st = await mgr.async_status()
+        links = st.get("links", [])
+        if not links:
+            await self._send_response(
+                "📡 No OGB-ESP connected.\nUse: esp add <ip> <device password>  (one entry per ESP mesh)"
+            )
+            return
+        badge = {"ok": "🟢 ok", "offline": "⚪ offline", "auth_failed": "🔴 login needed", "starting": "🟡 starting"}
+        lines = ["📡 OGB-ESP connections", "=" * 50]
+        for l in links:
+            lines.append(f"\n{l['host']}  {badge.get(l['state'], l['state'])}")
+            if l["state"] == "auth_failed":
+                lines.append("  -> esp add <ip> <password> to log in again")
+            if l.get("last_ok"):
+                age = int(datetime.now().timestamp() - l["last_ok"])
+                lines.append(f"  last heartbeat sent: {age} s ago")
+            if l.get("last_error") and l["state"] != "ok":
+                lines.append(f"  error: {l['last_error']}")
+            if l.get("mode"):
+                lines.append(
+                    f"  mode: {l['mode']}"
+                    + (" (local control paused)" if l.get("local_paused") else "")
+                    + ("" if l.get("takeover") else " | no automatic takeover")
+                )
+            for src in l.get("sources", []):
+                if src.get("enabled"):
+                    a = src.get("age_ms", -1)
+                    lines.append(
+                        f"  source {src.get('source')}: {'active' if src.get('active') else 'waiting'}"
+                        + (f", ESP got a heartbeat {round(a / 1000)} s ago" if a is not None and a >= 0 else "")
+                    )
+            areas = l.get("areas", [])
+            if areas:
+                lines.append("  areas:")
+                for a in areas:
+                    room = a.get("room")
+                    lines.append(
+                        f"    {a.get('name') or a.get('id')}: "
+                        + (f"room {room}" if room else "no HA room with this name")
+                    )
+            for h in l.get("holds", []):
+                lines.append(f"  manual: {h.get('name')} ({int(h.get('remaining_s', 0)) // 60} min left)")
+            if l.get("details_error"):
+                lines.append(f"  details: {l['details_error']}")
+        lines.append("\n" + "=" * 50)
+        await self._send_response("\n".join(lines))
+
+    # =========================
     # UTILITY METHODS
     # =========================
 
-    async def _send_response(self, message: str):
-        """Sends a response back to the console"""
+    async def _send_response(self, message: str, prompt: Optional[Dict[str, Any]] = None):
+        """Sends a response back to the console. prompt: the console shows a (password) input and
+        sends the value over the websocket command prompt["submit"] - never as a console command."""
         event_type = "ogb_console_response"
         event_data = {
             "room": self.room,
             "message": message,
             "timestamp": datetime.now().isoformat(),
         }
+        if prompt:
+            event_data["prompt"] = prompt
         _LOGGER.debug(f"[{self.room}] Sending console response: {message}")
         self.hass.bus.async_fire(event_type, event_data)
 
