@@ -571,7 +571,7 @@ class TestHumidityFromDewPoint:
 
 _DEFAULT_MODES = OGBConf(hass=None).drying["modes"]
 _DEFAULT_MODE_PHASES = [
-    (mode, phase) for mode, cfg in _DEFAULT_MODES.items() for phase in cfg["phase"]
+    (mode, phase) for mode, cfg in _DEFAULT_MODES.items() for phase in cfg.get("phase", {})
 ]
 
 

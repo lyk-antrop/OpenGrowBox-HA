@@ -353,7 +353,24 @@ async def handle_DewBased(self, phaseConfig):
         await self.adjust_dew_depression_down()
 ```
 
-#### 3.3 5DayDry Mode
+#### 3.3 DewRamp Drying
+Single continuous ramp instead of stages. The target dew point falls linearly from
+`startDewPoint` to `endDewPoint` over `totalDurationHours` (defaults: 12.5 → 11.5 °C over
+336 h, roughly 20 °C/62 % → 20 °C/58 %), then holds the end value. The target is rounded
+to 2 decimals. The measured dew point (sensor, or derived from temperature and humidity) is
+compared to the target within a hardcoded 0.5 °C tolerance (about ±2 % RH at 20 °C).
+`minHumidity`/`maxHumidity` (50–65 %) are hard RH limits that override the dew point check.
+Temperature is held at `targetTemp`.
+
+```python
+async def handle_DewRamp(self, config):
+    target_dew = self.get_dew_ramp_target(config)   # linear interpolation
+    dew_diff = current_dew - target_dew
+    too_dry = hum < min_hum or dew_diff < -tolerance
+    too_humid = hum > max_hum or dew_diff > tolerance
+```
+
+#### 3.4 5DayDry Mode
 ```python
 async def handle_5DayDry(self, phaseConfig):
     """Accelerated 5-day drying schedule."""
