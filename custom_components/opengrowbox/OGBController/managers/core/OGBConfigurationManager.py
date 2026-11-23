@@ -125,6 +125,7 @@ class OGBConfigurationManager:
             f"ogb_bloomswitchdate_{self.room.lower()}": self._update_bloom_switch_date_value,
             # Drying
             f"ogb_dryingmodes_{self.room.lower()}": self._update_drying_mode,
+            f"ogb_dryingstart_{self.room.lower()}": self._update_drying_start,
             # MINMAX
             f"ogb_minmax_control_{self.room.lower()}": self._update_min_max_control,
             f"ogb_nightset_control_{self.room.lower()}": self._update_night_set_control,
@@ -1197,6 +1198,31 @@ class OGBConfigurationManager:
             else:
                 from datetime import datetime
                 self.data_store.setDeep("drying.mode_start_time", datetime.now().isoformat())
+
+    async def _update_drying_start(self, data):
+        """
+        Update the start of the running drying mode from the OGB_DryingStart datetime entity.
+        """
+        value = data.newState[0] if data.newState else None
+        if self._is_unavailable_state(value):
+            return
+
+        try:
+            # HA reports an aware timestamp; the DataStore keeps naive local time (datetime.now())
+            new_start = datetime.fromisoformat(str(value)).astimezone().replace(tzinfo=None)
+        except ValueError:
+            _LOGGER.warning(f"{self.room}: Invalid drying start '{value}'")
+            return
+
+        current = self.data_store.getDeep("drying.mode_start_time")
+        try:
+            if current and abs((datetime.fromisoformat(current) - new_start).total_seconds()) < 1:
+                return
+        except (ValueError, TypeError):
+            pass
+
+        self.data_store.setDeep("drying.mode_start_time", new_start.isoformat())
+        await self.event_manager.emit("SaveState", {"source": "DryingStart"})
 
     async def _update_min_max_control(self, data):
         """

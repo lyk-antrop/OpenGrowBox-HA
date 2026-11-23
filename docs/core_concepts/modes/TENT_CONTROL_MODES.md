@@ -362,6 +362,9 @@ compared to the target within a hardcoded 0.5 °C tolerance (about ±2 % RH at 2
 `minHumidity`/`maxHumidity` (50–65 %) are hard RH limits that override the dew point check.
 Temperature is held at `targetTemp`.
 
+The start of the run is exposed as the `datetime.ogb_dryingstart_<room>` entity (`drying.mode_start_time`).
+Switching the drying mode resets it to now; set the entity afterwards to continue a run that began earlier.
+
 ```python
 async def handle_DewRamp(self, config):
     target_dew = self.get_dew_ramp_target(config)   # linear interpolation
