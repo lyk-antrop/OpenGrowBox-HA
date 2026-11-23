@@ -518,7 +518,7 @@ class OGBMainController:
         from ...utils.calcs import calculate_dew_point
         if temp is not None and hum is not None:
             dew = calculate_dew_point(temp, hum)
-            await _update_specific_sensor("ogb_ambientdewpoint_", self.room, dew, self.hass)
+            await _update_specific_sensor("ogb_outsitedewpoint_", self.room, dew, self.hass)
 
     async def _auto_update_plant_stages(self, data):
         """Automatically update plant stages periodically."""
